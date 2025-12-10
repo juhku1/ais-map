@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="fi">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>AIS-kartta (Digitraffic + Leaflet)</title>
+  <title>AIS Map (Digitraffic + Leaflet)</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -12,7 +12,7 @@
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
     .vessel-svg-icon { background: none !important; border: none !important; }
-    .attribuutio {
+    .attribution {
       position: fixed;
       bottom: 4px; left: 4px;
       background: white;
@@ -28,7 +28,7 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="attribuutio">
+<div class="attribution">
   Data © Fintraffic / Digitraffic (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>).
   Map © OpenStreetMap contributors.
 </div>
@@ -36,30 +36,11 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
   const DIGITRAFFIC_USER = "JuhaMatti/AISLeafletDemo";
-
-  // Käytetään erillistä nimeä, ettei mene sekaisin minkään muun 'map':n kanssa
-  const leafletMap = L.map("map").setView([60.2, 22.0], 6);
-
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  }).addTo(leafletMap);
-
-  let vesselLayer = null;
-  let firstLoad = true;
-  let loading = false;
-  const vesselState = {};
-  const vesselMetadataByMmsi = {};
-  let metadataLoaded = false;
-
-  // MMSI-maatietosanakirja
-  let mmsiCountry = {};
-
-  // UN/LOCODE-kartta: "FIPRS" -> { name: "Pietarsaari", country: "FI" }
-  let unlocodeMap = {};
   const UNLOCODE_URL = "https://raw.githubusercontent.com/datasets/un-locode/master/data/code-list.csv";
 
   // --- MMSI country CSV ---
+
+  let mmsiCountry = {};
 
   function loadMmsiCountry(callback) {
     fetch("mmsi_countries.csv")
@@ -78,11 +59,11 @@
           const country = parts[1].trim();
           if (digit && country) mmsiCountry[digit] = country;
         });
-        console.log("MMSI-maat ladattu, rivejä:", Object.keys(mmsiCountry).length);
+        console.log("MMSI countries loaded:", Object.keys(mmsiCountry).length);
         if (callback) callback();
       })
       .catch(err => {
-        console.error("MMSI-maatietojen lataus epäonnistui:", err);
+        console.error("Failed to load MMSI country data:", err);
         if (callback) callback();
       });
   }
@@ -94,6 +75,8 @@
   }
 
   // --- UN/LOCODE CSV ---
+
+  let unlocodeMap = {};
 
   function splitCsvLine(line) {
     const result = [];
@@ -152,7 +135,7 @@
         if (callback) callback();
       })
       .catch(err => {
-        console.error("UN/LOCODE lataus epäonnistui:", err);
+        console.error("Failed to load UN/LOCODE data:", err);
         if (callback) callback();
       });
   }
@@ -170,7 +153,7 @@
     return `${entry.name}, ${entry.country}`;
   }
 
-  // --- Yleiset apufunktiot ---
+  // --- Utility functions ---
 
   function haversine(lat1, lon1, lat2, lon2) {
     const R = 6371000;
@@ -205,6 +188,62 @@
     return (value === null || value === undefined || value === "") ? fallback : value;
   }
 
+  // --- Ship type, color and name ---
+
+  function shipTypeColor(shipType) {
+    if (shipType === undefined || shipType === null) return "#888";
+    if (shipType >= 60 && shipType < 70) return "#3a9eea";    // passenger
+    if (shipType >= 70 && shipType < 80) return "#f3c300";    // cargo
+    if (shipType >= 30 && shipType < 40) return "#e84e1b";    // fishing
+    if (shipType >= 80 && shipType < 90) return "#2ecc71";    // tanker
+    if (shipType >= 90) return "#ad00ff";                     // special
+    if (shipType >= 20 && shipType < 30) return "#aaaaaa";    // tug etc
+    if (shipType >= 50 && shipType < 60) return "#1abc9c";    // pilot/SAR
+    return "#888";
+  }
+
+  function shipTypeName(shipType) {
+    if (shipType === undefined || shipType === null) return "Unknown";
+    if (shipType >= 20 && shipType < 30) return "Wing-in-ground/Tug/Pusher";
+    if (shipType >= 30 && shipType < 40) return "Fishing";
+    if (shipType >= 40 && shipType < 50) return "High-speed craft";
+    if (shipType >= 50 && shipType < 60) return "Pilot/SAR";
+    if (shipType >= 60 && shipType < 70) return "Passenger";
+    if (shipType >= 70 && shipType < 80) return "Cargo";
+    if (shipType >= 80 && shipType < 90) return "Tanker";
+    if (shipType >= 90) return "Other special";
+    return "Other/Unknown";
+  }
+
+  function vesselSvg(speed, angle, color) {
+    const rounded = (typeof speed === "number" && isFinite(speed) && speed > 0)
+      ? Math.round(speed)
+      : "";
+    const rot = (typeof angle === "number" && isFinite(angle)) ? angle : 0;
+    return `
+      <svg width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(${rot}deg)">
+        <polygon points="22,4 38,40 22,32 6,40" fill="${color}" stroke="#222" stroke-width="2"/>
+        <text x="22" y="26" font-family="Arial" font-size="13" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle">${rounded}</text>
+      </svg>
+    `;
+  }
+
+  // --- MAP AND DATA LOADING ---
+
+  const leafletMap = L.map("map").setView([60.2, 22.0], 6);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  }).addTo(leafletMap);
+
+  let vesselLayer = null;
+  let firstLoad = true;
+  let loading = false;
+  const vesselState = {};
+  const vesselMetadataByMmsi = {};
+  let metadataLoaded = false;
+
   async function fetchVesselMetadata() {
     if (metadataLoaded) return;
     const url = "https://meri.digitraffic.fi/api/ais/v1/vessels";
@@ -227,31 +266,6 @@
     console.log("Vessel metadata count:", list.length);
   }
 
-  function shipTypeColor(shipType) {
-    if (shipType === undefined || shipType === null) return "#888";
-    if (shipType >= 60 && shipType < 70) return "#3a9eea";    // passenger
-    if (shipType >= 70 && shipType < 80) return "#f3c300";    // cargo
-    if (shipType >= 30 && shipType < 40) return "#e84e1b";    // fishing
-    if (shipType >= 80 && shipType < 90) return "#2ecc71";    // tanker
-    if (shipType >= 90) return "#ad00ff";                     // special
-    if (shipType >= 20 && shipType < 30) return "#aaaaaa";    // tug etc
-    if (shipType >= 50 && shipType < 60) return "#1abc9c";    // pilot/SAR
-    return "#888";
-  }
-
-  function vesselSvg(speed, angle, color) {
-    const rounded = (typeof speed === "number" && isFinite(speed) && speed > 0)
-      ? Math.round(speed)
-      : "";
-    const rot = (typeof angle === "number" && isFinite(angle)) ? angle : 0;
-    return `
-      <svg width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(${rot}deg)">
-        <polygon points="22,4 38,40 22,32 6,40" fill="${color}" stroke="#222" stroke-width="2"/>
-        <text x="22" y="26" font-family="Arial" font-size="13" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle">${rounded}</text>
-      </svg>
-    `;
-  }
-
   async function loadAis() {
     if (loading) return;
     loading = true;
@@ -270,7 +284,7 @@
       if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
       const data = await res.json();
 
-      // Päivitä historian perusteella lasketut nopeudet
+      // Update calculated speed for each vessel
       data.features.forEach(feature => {
         const props = feature.properties || {};
         const mmsi = props.mmsi || feature.mmsi;
@@ -341,6 +355,7 @@
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
 
+          // Destination decoding with city/country
           if (meta.destination) {
             const decoded = decodeDestination(meta.destination);
             if (decoded) {
@@ -354,7 +369,7 @@
             popupHtml += `<strong>Draft:</strong> ${formatMeters(meta.draught / 10)}<br>`;
           }
           if (shipType !== undefined) {
-            popupHtml += `<strong>Ship type code:</strong> ${shipType}<br>`;
+            popupHtml += `<strong>Ship type:</strong> ${shipTypeName(shipType)} (${shipType})<br>`;
           }
 
           popupHtml += `<hr style="margin:4px 0;">`;
@@ -375,7 +390,7 @@
 
           return L.marker(latlng, { icon: vesselIcon }).bindPopup(popupHtml);
         }
-      }).addTo(leafletMap);  // <-- tärkeää: käytä leafletMap, ei 'map'
+      }).addTo(leafletMap);
 
       if (firstLoad) {
         const bounds = vesselLayer.getBounds();
@@ -385,13 +400,14 @@
 
       console.log("AIS features:", data.features ? data.features.length : 0);
     } catch (err) {
-      console.error("AIS-datan haku epäonnistui:", err);
+      console.error("AIS data fetch failed:", err);
     } finally {
       loading = false;
     }
   }
 
-  // Lataa ensin MMSI-maat, sitten UN/LOCODE, ja lopuksi AIS-data
+  // --- Load MMSI countries, then UN/LOCODE, then start AIS polling ---
+
   loadMmsiCountry(() => {
     loadUnlocode(() => {
       loadAis();
