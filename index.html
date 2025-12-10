@@ -50,6 +50,35 @@
   const vesselMetadataByMmsi = {};
   let metadataLoaded = false;
 
+  // MMSI-maatietosanakirja
+  let mmsiCountry = {};
+
+  // Lataa mmsi_countries.csv ja rakenna sanakirja
+  function loadMmsiCountry(callback) {
+    fetch("mmsi_countries.csv")
+      .then(res => res.text())
+      .then(csv => {
+        mmsiCountry = {};
+        csv.split('\n').forEach(line => {
+          line = line.trim();
+          if (!line || line.startsWith('Digit')) return; // otsikko/rivit
+          const [digit, country] = line.split(';');
+          if (digit && country) mmsiCountry[digit] = country;
+        });
+        if (callback) callback();
+      })
+      .catch(err => {
+        console.error("MMSI-maatietojen lataus epäonnistui:", err);
+        if (callback) callback();
+      });
+  }
+
+  function getMmsiCountry(mmsi) {
+    if (!mmsi) return "";
+    const prefix = String(mmsi).substring(0, 3);
+    return mmsiCountry[prefix] || "";
+  }
+
   function haversine(lat1, lon1, lat2, lon2) {
     const R = 6371000;
     const toRad = d => d * Math.PI / 180;
@@ -202,6 +231,8 @@
           const name = meta.name || props.name || "Tuntematon alus";
           popupHtml += `<strong>${safe(name)}</strong><br>`;
           popupHtml += `<strong>MMSI:</strong> ${safe(mmsi)}<br>`;
+          // Rekisteröintimaa MMSI:stä
+          popupHtml += `<strong>Rekisteröintimaa:</strong> ${getMmsiCountry(mmsi)}<br>`;
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
           if (meta.destination) popupHtml += `<strong>Destination:</strong> ${meta.destination}<br>`;
@@ -239,8 +270,11 @@
     }
   }
 
-  loadAis();
-  setInterval(loadAis, 60 * 1000);
+  // Lataa ensin MMSI-maat ja käynnistä kartta vasta sitten
+  loadMmsiCountry(() => {
+    loadAis();
+    setInterval(loadAis, 60 * 1000);
+  });
 </script>
 </body>
 </html>
