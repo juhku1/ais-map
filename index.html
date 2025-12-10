@@ -35,10 +35,10 @@
 
 <script>
   // Muuta tämä omaan sovellukseesi sopivaksi
-  const DIGITRAFFIC_USER = "JuhaMatti/LeafletAISDemo 1.0";
+  const DIGITRAFFIC_USER = "JuhaMatti/AISLeafletDemo 1.1";
 
-  // Luodaan Leaflet-kartta
-  const map = L.map("map").setView([60.2, 22.0], 6); // Suomen rannikko suunnilleen
+  // Leaflet-kartta
+  const map = L.map("map").setView([60.2, 22.0], 6); // Suomen rannikko
 
   // Taustakartta (OSM)
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -48,14 +48,93 @@
   }).addTo(map);
 
   let vesselLayer = null;
-  let firstLoad = true; // zoomataan vain ensimmäisellä kerralla
+  let firstLoad = true;
+  let loading = false;
+
+  // MMSI -> aiempi tila (seuranta + laskettu nopeus)
+  const vesselState = {};
+  // MMSI -> metadata (/vessels)
+  const vesselMetadataByMmsi = {};
+  let metadataLoaded = false;
+
+  // Haversine-etäisyys maapallolla (metreinä)
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000; // maan säde metreinä
+    const toRad = d => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  function formatKnots(value) {
+    if (typeof value !== "number" || !isFinite(value)) return "–";
+    return value.toFixed(1) + " kn";
+  }
+
+  function formatMeters(value) {
+    if (typeof value !== "number" || !isFinite(value)) return "–";
+    return value.toFixed(1) + " m";
+  }
+
+  function formatTimestampMs(tsMs) {
+    if (typeof tsMs !== "number" || !isFinite(tsMs)) return "–";
+    return new Date(tsMs).toLocaleString();
+  }
+
+  function formatLatLon(lat, lon) {
+    if (typeof lat !== "number" || typeof lon !== "number") return "–";
+    return lat.toFixed(5) + ", " + lon.toFixed(5);
+  }
+
+  function safe(value, fallback = "–") {
+    return (value === null || value === undefined || value === "") ? fallback : value;
+  }
+
+  async function fetchVesselMetadata() {
+    if (metadataLoaded) return;
+
+    const url = "https://meri.digitraffic.fi/api/ais/v1/vessels";
+    const res = await fetch(url, {
+      headers: {
+        "Digitraffic-User": DIGITRAFFIC_USER,
+        "Accept": "application/json"
+      }
+    });
+
+    if (!res.ok) {
+      console.warn("Vessel-metadatahaku epäonnistui:", res.status, res.statusText);
+      return;
+    }
+
+    const list = await res.json(); // taulukko objekteja
+    for (const v of list) {
+      if (!v || !v.mmsi) continue;
+      vesselMetadataByMmsi[v.mmsi] = v;
+    }
+    metadataLoaded = true;
+    console.log("Vessel-metadatan määrä:", list.length);
+  }
 
   async function loadAis() {
-    const sixHoursMs = 6 * 60 * 60 * 1000;
-    const from = Date.now() - sixHoursMs;
-    const url = "https://meri.digitraffic.fi/api/ais/v1/locations?from=" + from;
+    if (loading) return; // älä aja rinnakkain
+    loading = true;
 
     try {
+      // Lataa metadata kerran alussa (tai jos ei vielä ole)
+      if (!metadataLoaded) {
+        await fetchVesselMetadata();
+      }
+
+      // Viimeiset 30 min riittää, etkä saa liikaa dataa
+      const thirtyMinutesMs = 30 * 60 * 1000;
+      const from = Date.now() - thirtyMinutesMs;
+      const url = "https://meri.digitraffic.fi/api/ais/v1/locations?from=" + from;
+
       const res = await fetch(url, {
         headers: {
           "Digitraffic-User": DIGITRAFFIC_USER,
@@ -69,41 +148,139 @@
 
       const data = await res.json();
 
-      // Poistetaan vanha kerros, jos on
+      // Poista vanha kerros
       if (vesselLayer) {
         vesselLayer.remove();
       }
 
-      // GeoJSON-kerros aluksille
+      // Luo alusten kerros
       vesselLayer = L.geoJSON(data, {
         pointToLayer: (feature, latlng) => {
           const props = feature.properties || {};
-          const mmsi = props.mmsi || feature.mmsi || "–";
-          const name = props.name || "Tuntematon alus";
-          const sog = props.sog || props.speedOverGround;
-          const cog = props.cog || props.courseOverGround;
+          const mmsi = props.mmsi || feature.mmsi;
+          const meta = vesselMetadataByMmsi[mmsi] || {};
 
-          let popupHtml =
-            `<strong>${name}</strong><br>` +
-            `<strong>MMSI:</strong> ${mmsi}`;
+          const lat = latlng.lat;
+          const lon = latlng.lng;
 
-          if (typeof sog !== "undefined") {
-            popupHtml += `<br><strong>SOG:</strong> ${sog} kn`;
+          // AIS:n raportoidut tiedot
+          const sog = (typeof props.sog === "number" ? props.sog : undefined); // kn
+          const cog = props.cog;
+          const heading = props.heading;
+          const navStat = props.navStat;
+          const posAcc = props.posAcc;
+          const raim = props.raim;
+          const rot = props.rot;
+          const tsExt = props.timestampExternal; // ms unix time
+          const tsInternal = props.timestamp;    // AIS UTC second (0–59), ei niin tärkeä
+
+          // Lasketaan oma nopeusarvio kahden peräkkäisen sijainnin välillä
+          let calcSpeedKnots = null;
+          if (typeof tsExt === "number") {
+            const prev = vesselState[mmsi];
+            if (prev) {
+              const dtMs = tsExt - prev.lastTimestampMs;
+              const dtS = dtMs / 1000;
+
+              // Rajaa pois järjettömän lyhyet tai pitkät intervallit
+              if (dtS > 5 && dtS < 3600) {
+                const distM = haversine(prev.lastLat, prev.lastLon, lat, lon);
+                if (distM > 1) {
+                  // kn = m * 3600 / (1852 * s)
+                  calcSpeedKnots = distM * 3600 / (1852 * dtS);
+                }
+              }
+            }
+
+            // Päivitä tila tälle alukselle
+            vesselState[mmsi] = {
+              lastLat: lat,
+              lastLon: lon,
+              lastTimestampMs: tsExt,
+              lastCalcSpeedKnots: calcSpeedKnots
+            };
           }
-          if (typeof cog !== "undefined") {
-            popupHtml += `<br><strong>COG:</strong> ${cog}&deg;`;
+
+          // Metatiedot aluksesta
+          const name = meta.name || props.name || "Tuntematon alus";
+          const imo = meta.imo;
+          const callSign = meta.callSign;
+          const destination = meta.destination;
+          const draughtDm = meta.draught; // AIS: 0.1 m yksiköissä
+          const draughtM = (typeof draughtDm === "number") ? draughtDm / 10 : undefined;
+          const shipType = meta.shipType;
+          const posType = meta.posType;
+          const eta = meta.eta; // AIS eta raw-kenttänä; ei helposti luettava
+
+          // Popup HTML
+          let popupHtml = "";
+
+          popupHtml += `<strong>${safe(name)}</strong><br>`;
+          popupHtml += `<strong>MMSI:</strong> ${safe(mmsi)}<br>`;
+
+          if (imo) {
+            popupHtml += `<strong>IMO:</strong> ${imo}<br>`;
+          }
+          if (callSign) {
+            popupHtml += `<strong>Callsign:</strong> ${callSign}<br>`;
+          }
+          if (destination) {
+            popupHtml += `<strong>Destination:</strong> ${destination}<br>`;
           }
 
-          return L.circleMarker(latlng, {
-            radius: 4,
+          if (typeof draughtM === "number") {
+            popupHtml += `<strong>Draft:</strong> ${formatMeters(draughtM)}<br>`;
+          }
+
+          if (shipType !== undefined) {
+            popupHtml += `<strong>Ship type code:</strong> ${shipType}<br>`;
+          }
+
+          popupHtml += `<hr style="margin:4px 0;">`;
+
+          popupHtml += `<strong>Reported SOG:</strong> ${formatKnots(sog)}<br>`;
+          popupHtml += `<strong>Calculated speed:</strong> ${formatKnots(calcSpeedKnots)}<br>`;
+
+          if (cog !== undefined) {
+            popupHtml += `<strong>COG:</strong> ${cog}&deg;<br>`;
+          }
+          if (heading !== undefined) {
+            popupHtml += `<strong>Heading:</strong> ${heading}&deg;<br>`;
+          }
+          if (navStat !== undefined) {
+            popupHtml += `<strong>Nav status code:</strong> ${navStat}<br>`;
+          }
+          if (posAcc !== undefined) {
+            popupHtml += `<strong>Position accuracy:</strong> ${posAcc ? "high" : "low"}<br>`;
+          }
+          if (raim !== undefined) {
+            popupHtml += `<strong>RAIM:</strong> ${raim ? "on" : "off"}<br>`;
+          }
+          if (rot !== undefined) {
+            popupHtml += `<strong>ROT:</strong> ${rot}<br>`;
+          }
+
+          if (typeof tsExt === "number") {
+            popupHtml += `<strong>Last update:</strong> ${formatTimestampMs(tsExt)}<br>`;
+          } else if (tsInternal !== undefined) {
+            popupHtml += `<strong>Timestamp (AIS UTC sec):</strong> ${tsInternal}<br>`;
+          }
+
+          popupHtml += `<strong>Position:</strong> ${formatLatLon(lat, lon)}<br>`;
+
+          // Yksinkertainen markkeri
+          const marker = L.circleMarker(latlng, {
+            radius: 5,
             weight: 1,
             opacity: 1.0,
             fillOpacity: 0.8
           }).bindPopup(popupHtml);
+
+          return marker;
         }
       }).addTo(map);
 
-      // Zoomaa alusten ympärille vain ensimmäisellä haulla
+      // Zoomaa vain ensimmäisellä haulla
       if (firstLoad) {
         const bounds = vesselLayer.getBounds();
         if (bounds.isValid()) {
@@ -115,13 +292,15 @@
       console.log("AIS features:", data.features ? data.features.length : 0);
     } catch (err) {
       console.error("AIS-datan haku epäonnistui:", err);
+    } finally {
+      loading = false;
     }
   }
 
   // Ensimmäinen haku
   loadAis();
 
-  // Päivitä 60 sekunnin välein
+  // Päivitä 60 sekunnin välein (seuranta)
   setInterval(loadAis, 60 * 1000);
 </script>
 </body>
