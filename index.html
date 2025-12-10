@@ -39,7 +39,6 @@
   const UNLOCODE_URL = "https://raw.githubusercontent.com/datasets/un-locode/master/data/code-list.csv";
 
   // --- MMSI country CSV ---
-
   let mmsiCountry = {};
 
   function loadMmsiCountry(callback) {
@@ -74,8 +73,59 @@
     return mmsiCountry[prefix] || "";
   }
 
-  // --- UN/LOCODE CSV ---
+  // --- Flag lookup for MMSI country (registration country) ---
+  // Map some known country names to ISO2
+  const countryNameToIso2 = {
+    "Finland": "FI",
+    "Sweden": "SE",
+    "Norway": "NO",
+    "Denmark": "DK",
+    "Estonia": "EE",
+    "Latvia": "LV",
+    "Lithuania": "LT",
+    "Germany (Federal Republic of)": "DE",
+    "Netherlands (Kingdom of the)": "NL",
+    "Belgium": "BE",
+    "United Kingdom of Great Britain and Northern Ireland": "GB",
+    "Ireland": "IE",
+    "Russian Federation": "RU",
+    "Poland (Republic of)": "PL",
+    "France": "FR",
+    "Spain": "ES",
+    "Portugal": "PT",
+    "Portugal - Madeira": "PT",
+    "Portugal - Azores": "PT",
+    "Malta": "MT",
+    "Greece": "GR",
+    "Italy": "IT",
+    "Iceland": "IS",
+    "Cyprus (Republic of)": "CY",
+    "United Kingdom of Great Britain and Northern Ireland - Gibraltar": "GI",
+    // ... add more as needed
+  };
 
+  function getCountryIso2FromMmsiCountry(countryName) {
+    // Try direct match
+    if (countryNameToIso2[countryName]) return countryNameToIso2[countryName];
+    // Try first part before " - " (for "UK - Gibraltar" etc.)
+    const mainName = countryName.split(" - ")[0].trim();
+    if (countryNameToIso2[mainName]) return countryNameToIso2[mainName];
+    // Try just the first word (for safety)
+    const firstWord = countryName.split(" ")[0].trim();
+    if (countryNameToIso2[firstWord]) return countryNameToIso2[firstWord];
+    return "";
+  }
+
+  function countryFlagEmoji(countryCode) {
+    if (!countryCode || countryCode.length !== 2) return "";
+    const OFFSET = 127397;
+    return String.fromCodePoint(
+      countryCode.charCodeAt(0) + OFFSET,
+      countryCode.charCodeAt(1) + OFFSET
+    );
+  }
+
+  // --- UN/LOCODE CSV ---
   let unlocodeMap = {};
 
   function splitCsvLine(line) {
@@ -351,7 +401,13 @@
           let popupHtml = "";
           popupHtml += `<strong>${safe(name)}</strong><br>`;
           popupHtml += `<strong>MMSI:</strong> ${safe(mmsi)}<br>`;
-          popupHtml += `<strong>Flag state:</strong> ${getMmsiCountry(mmsi) || "–"}<br>`;
+
+          // Registration country/flag
+          const regCountry = getMmsiCountry(mmsi) || "–";
+          const regIso2 = getCountryIso2FromMmsiCountry(regCountry);
+          const regFlag = regIso2 ? ` ${countryFlagEmoji(regIso2)}` : "";
+          popupHtml += `<strong>Flag state:</strong> ${regCountry}${regFlag}<br>`;
+
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
 
