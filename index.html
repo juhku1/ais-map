@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fi">
 <head>
   <meta charset="utf-8" />
-  <title>AIS Map (Digitraffic + Leaflet)</title>
+  <title>AIS-kartta (Digitraffic + Leaflet)</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -12,7 +12,7 @@
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
     .vessel-svg-icon { background: none !important; border: none !important; }
-    .attribution {
+    .attribuutio {
       position: fixed;
       bottom: 4px; left: 4px;
       background: white;
@@ -28,37 +28,61 @@
 </head>
 <body>
 <div id="map"></div>
-<div class="attribution">
+<div class="attribuutio">
   Data © Fintraffic / Digitraffic (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>).
   Map © OpenStreetMap contributors.
 </div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
   const DIGITRAFFIC_USER = "JuhaMatti/AISLeafletDemo";
-  const UNLOCODE_URL = "https://raw.githubusercontent.com/datasets/un-locode/master/data/code-list.csv";
 
-  // MMSI registration country dictionary
+  // Käytetään erillistä nimeä, ettei mene sekaisin minkään muun 'map':n kanssa
+  const leafletMap = L.map("map").setView([60.2, 22.0], 6);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  }).addTo(leafletMap);
+
+  let vesselLayer = null;
+  let firstLoad = true;
+  let loading = false;
+  const vesselState = {};
+  const vesselMetadataByMmsi = {};
+  let metadataLoaded = false;
+
+  // MMSI-maatietosanakirja
   let mmsiCountry = {};
 
-  // UN/LOCODE map: e.g. "FIPRS" -> { name: "Pietarsaari", country: "FI" }
+  // UN/LOCODE-kartta: "FIPRS" -> { name: "Pietarsaari", country: "FI" }
   let unlocodeMap = {};
+  const UNLOCODE_URL = "https://raw.githubusercontent.com/datasets/un-locode/master/data/code-list.csv";
 
-  // Load MMSI countries from CSV
+  // --- MMSI country CSV ---
+
   function loadMmsiCountry(callback) {
     fetch("mmsi_countries.csv")
-      .then(res => res.text())
+      .then(res => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.text();
+      })
       .then(csv => {
         mmsiCountry = {};
-        csv.split('\n').forEach(line => {
+        csv.split(/\r?\n/).forEach(line => {
           line = line.trim();
-          if (!line || line.startsWith('Digit')) return; // header/empty lines
-          const [digit, country] = line.split(';');
+          if (!line || line.startsWith("Digit")) return;
+          const parts = line.split(";");
+          if (parts.length < 2) return;
+          const digit = parts[0].trim();
+          const country = parts[1].trim();
           if (digit && country) mmsiCountry[digit] = country;
         });
+        console.log("MMSI-maat ladattu, rivejä:", Object.keys(mmsiCountry).length);
         if (callback) callback();
       })
       .catch(err => {
-        console.error("Loading MMSI country data failed:", err);
+        console.error("MMSI-maatietojen lataus epäonnistui:", err);
         if (callback) callback();
       });
   }
@@ -69,7 +93,8 @@
     return mmsiCountry[prefix] || "";
   }
 
-  // Simple CSV splitter for a line, supporting quotes
+  // --- UN/LOCODE CSV ---
+
   function splitCsvLine(line) {
     const result = [];
     let current = "";
@@ -94,10 +119,12 @@
     return result;
   }
 
-  // Load UN/LOCODE list from GitHub
   function loadUnlocode(callback) {
     fetch(UNLOCODE_URL)
-      .then(res => res.text())
+      .then(res => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.text();
+      })
       .then(csv => {
         unlocodeMap = {};
         const lines = csv.split(/\r?\n/);
@@ -107,7 +134,7 @@
         const idxLocation = header.indexOf("Location");
         const idxName = header.indexOf("Name");
         if (idxCountry === -1 || idxLocation === -1 || idxName === -1) {
-          console.warn("UN/LOCODE header not as expected");
+          console.warn("UN/LOCODE header unexpected:", header);
           return;
         }
         for (let i = 1; i < lines.length; i++) {
@@ -125,7 +152,7 @@
         if (callback) callback();
       })
       .catch(err => {
-        console.error("UN/LOCODE loading failed:", err);
+        console.error("UN/LOCODE lataus epäonnistui:", err);
         if (callback) callback();
       });
   }
@@ -143,6 +170,8 @@
     return `${entry.name}, ${entry.country}`;
   }
 
+  // --- Yleiset apufunktiot ---
+
   function haversine(lat1, lon1, lat2, lon2) {
     const R = 6371000;
     const toRad = d => d * Math.PI / 180;
@@ -155,6 +184,7 @@
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   }
+
   function formatKnots(value) {
     if (typeof value !== "number" || !isFinite(value)) return "–";
     return value.toFixed(1) + " kn";
@@ -197,55 +227,37 @@
     console.log("Vessel metadata count:", list.length);
   }
 
-  // Return a color for ship type code
   function shipTypeColor(shipType) {
     if (shipType === undefined || shipType === null) return "#888";
-    if (shipType >= 60 && shipType < 70) return "#3a9eea";    // passenger (blue)
-    if (shipType >= 70 && shipType < 80) return "#f3c300";    // cargo (yellow)
-    if (shipType >= 30 && shipType < 40) return "#e84e1b";    // fishing (orange)
-    if (shipType >= 80 && shipType < 90) return "#2ecc71";    // tanker (green)
-    if (shipType >= 90) return "#ad00ff";                     // other special (violet)
-    if (shipType >= 20 && shipType < 30) return "#aaaaaa";    // tug etc (grey)
-    if (shipType >= 50 && shipType < 60) return "#1abc9c";    // pilot/SAR (turquoise)
-    return "#888"; // other
-  }
-
-  // Human-readable vessel type for ship type code
-  function shipTypeName(shipType) {
-    if (shipType === undefined || shipType === null) return "Unknown";
-    if (shipType >= 20 && shipType < 30) return "Wing-in-ground/Tug/Pusher";
-    if (shipType >= 30 && shipType < 40) return "Fishing";
-    if (shipType >= 40 && shipType < 50) return "High-speed craft";
-    if (shipType >= 50 && shipType < 60) return "Pilot/SAR";
-    if (shipType >= 60 && shipType < 70) return "Passenger";
-    if (shipType >= 70 && shipType < 80) return "Cargo";
-    if (shipType >= 80 && shipType < 90) return "Tanker";
-    if (shipType >= 90) return "Other special";
-    return "Other/Unknown";
+    if (shipType >= 60 && shipType < 70) return "#3a9eea";    // passenger
+    if (shipType >= 70 && shipType < 80) return "#f3c300";    // cargo
+    if (shipType >= 30 && shipType < 40) return "#e84e1b";    // fishing
+    if (shipType >= 80 && shipType < 90) return "#2ecc71";    // tanker
+    if (shipType >= 90) return "#ad00ff";                     // special
+    if (shipType >= 20 && shipType < 30) return "#aaaaaa";    // tug etc
+    if (shipType >= 50 && shipType < 60) return "#1abc9c";    // pilot/SAR
+    return "#888";
   }
 
   function vesselSvg(speed, angle, color) {
-    speed = (typeof speed === "number" && isFinite(speed) && speed > 0) ? Math.round(speed) : "";
+    const rounded = (typeof speed === "number" && isFinite(speed) && speed > 0)
+      ? Math.round(speed)
+      : "";
+    const rot = (typeof angle === "number" && isFinite(angle)) ? angle : 0;
     return `
-      <svg width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(${angle}deg)">
+      <svg width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(${rot}deg)">
         <polygon points="22,4 38,40 22,32 6,40" fill="${color}" stroke="#222" stroke-width="2"/>
-        <text x="22" y="26" font-family="Arial" font-size="13" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle">${speed}</text>
+        <text x="22" y="26" font-family="Arial" font-size="13" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle">${rounded}</text>
       </svg>
     `;
   }
-
-  let vesselLayer = null;
-  let firstLoad = true;
-  let loading = false;
-  const vesselState = {};
-  const vesselMetadataByMmsi = {};
-  let metadataLoaded = false;
 
   async function loadAis() {
     if (loading) return;
     loading = true;
     try {
       if (!metadataLoaded) await fetchVesselMetadata();
+
       const thirtyMinutesMs = 30 * 60 * 1000;
       const from = Date.now() - thirtyMinutesMs;
       const url = "https://meri.digitraffic.fi/api/ais/v1/locations?from=" + from;
@@ -258,9 +270,11 @@
       if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
       const data = await res.json();
 
+      // Päivitä historian perusteella lasketut nopeudet
       data.features.forEach(feature => {
         const props = feature.properties || {};
         const mmsi = props.mmsi || feature.mmsi;
+        if (!mmsi) return;
         const lat = feature.geometry.coordinates[1];
         const lon = feature.geometry.coordinates[0];
         const sog = (typeof props.sog === "number" ? props.sog : undefined);
@@ -296,12 +310,17 @@
           const meta = vesselMetadataByMmsi[mmsi] || {};
           const sog = (typeof props.sog === "number" ? props.sog : undefined);
           let calcSpeedKnots = (vesselState[mmsi] && typeof vesselState[mmsi].lastCalcSpeedKnots === "number")
-            ? vesselState[mmsi].lastCalcSpeedKnots : null;
+            ? vesselState[mmsi].lastCalcSpeedKnots
+            : null;
+
           const speed = (typeof calcSpeedKnots === "number" && isFinite(calcSpeedKnots))
             ? calcSpeedKnots
             : (typeof sog === "number" && isFinite(sog) ? sog : 0);
-          let angle = (typeof props.heading === "number" && isFinite(props.heading)) ? props.heading
-                   : (typeof props.cog === "number" && isFinite(props.cog) ? props.cog : 0);
+
+          let angle = (typeof props.heading === "number" && isFinite(props.heading))
+            ? props.heading
+            : (typeof props.cog === "number" && isFinite(props.cog) ? props.cog : 0);
+
           const shipType = meta.shipType;
           const color = shipTypeColor(shipType);
           const svgIcon = vesselSvg(speed, angle, color);
@@ -313,15 +332,15 @@
             popupAnchor: [0, -20]
           });
 
-          let popupHtml = "";
           const name = meta.name || props.name || "Unknown vessel";
+
+          let popupHtml = "";
           popupHtml += `<strong>${safe(name)}</strong><br>`;
           popupHtml += `<strong>MMSI:</strong> ${safe(mmsi)}<br>`;
-          popupHtml += `<strong>Registration country:</strong> ${getMmsiCountry(mmsi)}<br>`;
+          popupHtml += `<strong>Flag state:</strong> ${getMmsiCountry(mmsi) || "–"}<br>`;
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
 
-          // Destination decoding
           if (meta.destination) {
             const decoded = decodeDestination(meta.destination);
             if (decoded) {
@@ -331,41 +350,48 @@
             }
           }
 
-          if (typeof meta.draught === "number") popupHtml += `<strong>Draft:</strong> ${formatMeters(meta.draught/10)}<br>`;
-          if (shipType !== undefined) popupHtml += `<strong>Ship type code:</strong> ${shipType} (${shipTypeName(shipType)})<br>`;
+          if (typeof meta.draught === "number") {
+            popupHtml += `<strong>Draft:</strong> ${formatMeters(meta.draught / 10)}<br>`;
+          }
+          if (shipType !== undefined) {
+            popupHtml += `<strong>Ship type code:</strong> ${shipType}<br>`;
+          }
+
           popupHtml += `<hr style="margin:4px 0;">`;
           popupHtml += `<strong>Reported SOG:</strong> ${formatKnots(sog)}<br>`;
           popupHtml += `<strong>Calculated speed:</strong> ${formatKnots(calcSpeedKnots)}<br>`;
           if (props.cog !== undefined) popupHtml += `<strong>COG:</strong> ${props.cog}&deg;<br>`;
           if (props.heading !== undefined) popupHtml += `<strong>Heading:</strong> ${props.heading}&deg;<br>`;
-          if (props.navStat !== undefined) popupHtml += `<strong>Navigation status code:</strong> ${props.navStat}<br>`;
+          if (props.navStat !== undefined) popupHtml += `<strong>Nav status code:</strong> ${props.navStat}<br>`;
           if (props.posAcc !== undefined) popupHtml += `<strong>Position accuracy:</strong> ${props.posAcc ? "high" : "low"}<br>`;
           if (props.raim !== undefined) popupHtml += `<strong>RAIM:</strong> ${props.raim ? "on" : "off"}<br>`;
           if (props.rot !== undefined) popupHtml += `<strong>ROT:</strong> ${props.rot}<br>`;
-          if (typeof props.timestampExternal === "number")
+          if (typeof props.timestampExternal === "number") {
             popupHtml += `<strong>Last update:</strong> ${formatTimestampMs(props.timestampExternal)}<br>`;
-          else if (props.timestamp !== undefined)
+          } else if (props.timestamp !== undefined) {
             popupHtml += `<strong>Timestamp (AIS UTC sec):</strong> ${props.timestamp}<br>`;
+          }
           popupHtml += `<strong>Position:</strong> ${formatLatLon(latlng.lat, latlng.lng)}<br>`;
 
-          return L.marker(latlng, {icon: vesselIcon}).bindPopup(popupHtml);
+          return L.marker(latlng, { icon: vesselIcon }).bindPopup(popupHtml);
         }
-      }).addTo(map);
+      }).addTo(leafletMap);  // <-- tärkeää: käytä leafletMap, ei 'map'
 
       if (firstLoad) {
         const bounds = vesselLayer.getBounds();
-        if (bounds.isValid()) map.fitBounds(bounds.pad(0.1));
+        if (bounds.isValid()) leafletMap.fitBounds(bounds.pad(0.1));
         firstLoad = false;
       }
+
       console.log("AIS features:", data.features ? data.features.length : 0);
     } catch (err) {
-      console.error("AIS data fetch failed:", err);
+      console.error("AIS-datan haku epäonnistui:", err);
     } finally {
       loading = false;
     }
   }
 
-  // Load MMSI countries, then UN/LOCODE, then start AIS polling
+  // Lataa ensin MMSI-maat, sitten UN/LOCODE, ja lopuksi AIS-data
   loadMmsiCountry(() => {
     loadUnlocode(() => {
       loadAis();
