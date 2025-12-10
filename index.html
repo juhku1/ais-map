@@ -35,25 +35,15 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
   const DIGITRAFFIC_USER = "JuhaMatti/AISLeafletDemo";
+  const UNLOCODE_URL = "https://raw.githubusercontent.com/datasets/un-locode/master/data/code-list.csv";
 
-  const map = L.map("map").setView([60.2, 22.0], 6);
-
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  }).addTo(map);
-
-  let vesselLayer = null;
-  let firstLoad = true;
-  let loading = false;
-  const vesselState = {};
-  const vesselMetadataByMmsi = {};
-  let metadataLoaded = false;
-
-  // MMSI country dictionary
+  // MMSI registration country dictionary
   let mmsiCountry = {};
 
-  // Fetch mmsi_countries.csv and build the dictionary
+  // UN/LOCODE map: e.g. "FIPRS" -> { name: "Pietarsaari", country: "FI" }
+  let unlocodeMap = {};
+
+  // Load MMSI countries from CSV
   function loadMmsiCountry(callback) {
     fetch("mmsi_countries.csv")
       .then(res => res.text())
@@ -77,6 +67,80 @@
     if (!mmsi) return "";
     const prefix = String(mmsi).substring(0, 3);
     return mmsiCountry[prefix] || "";
+  }
+
+  // Simple CSV splitter for a line, supporting quotes
+  function splitCsvLine(line) {
+    const result = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === "," && !inQuotes) {
+        result.push(current);
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current);
+    return result;
+  }
+
+  // Load UN/LOCODE list from GitHub
+  function loadUnlocode(callback) {
+    fetch(UNLOCODE_URL)
+      .then(res => res.text())
+      .then(csv => {
+        unlocodeMap = {};
+        const lines = csv.split(/\r?\n/);
+        if (!lines.length) return;
+        const header = splitCsvLine(lines[0]);
+        const idxCountry = header.indexOf("Country");
+        const idxLocation = header.indexOf("Location");
+        const idxName = header.indexOf("Name");
+        if (idxCountry === -1 || idxLocation === -1 || idxName === -1) {
+          console.warn("UN/LOCODE header not as expected");
+          return;
+        }
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const cols = splitCsvLine(line);
+          const country = cols[idxCountry];
+          const loc = cols[idxLocation];
+          const name = cols[idxName];
+          if (!country || !loc || !name) continue;
+          const code = (country + loc).replace(/\s+/g, "").toUpperCase();
+          unlocodeMap[code] = { name: name, country: country };
+        }
+        console.log("UNLOCODE entries loaded:", Object.keys(unlocodeMap).length);
+        if (callback) callback();
+      })
+      .catch(err => {
+        console.error("UN/LOCODE loading failed:", err);
+        if (callback) callback();
+      });
+  }
+
+  function normalizeDestinationCode(raw) {
+    if (!raw) return null;
+    return String(raw).replace(/\s+/g, "").toUpperCase();
+  }
+
+  function decodeDestination(raw) {
+    const norm = normalizeDestinationCode(raw);
+    if (!norm) return null;
+    const entry = unlocodeMap[norm];
+    if (!entry) return null;
+    return `${entry.name}, ${entry.country}`;
   }
 
   function haversine(lat1, lon1, lat2, lon2) {
@@ -149,7 +213,7 @@
   // Human-readable vessel type for ship type code
   function shipTypeName(shipType) {
     if (shipType === undefined || shipType === null) return "Unknown";
-    if (shipType >= 20 && shipType < 30) return "Wing in ground/Tug/Pusher";
+    if (shipType >= 20 && shipType < 30) return "Wing-in-ground/Tug/Pusher";
     if (shipType >= 30 && shipType < 40) return "Fishing";
     if (shipType >= 40 && shipType < 50) return "High-speed craft";
     if (shipType >= 50 && shipType < 60) return "Pilot/SAR";
@@ -169,6 +233,13 @@
       </svg>
     `;
   }
+
+  let vesselLayer = null;
+  let firstLoad = true;
+  let loading = false;
+  const vesselState = {};
+  const vesselMetadataByMmsi = {};
+  let metadataLoaded = false;
 
   async function loadAis() {
     if (loading) return;
@@ -249,7 +320,17 @@
           popupHtml += `<strong>Registration country:</strong> ${getMmsiCountry(mmsi)}<br>`;
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
-          if (meta.destination) popupHtml += `<strong>Destination:</strong> ${meta.destination}<br>`;
+
+          // Destination decoding
+          if (meta.destination) {
+            const decoded = decodeDestination(meta.destination);
+            if (decoded) {
+              popupHtml += `<strong>Destination:</strong> ${meta.destination} (${decoded})<br>`;
+            } else {
+              popupHtml += `<strong>Destination:</strong> ${meta.destination}<br>`;
+            }
+          }
+
           if (typeof meta.draught === "number") popupHtml += `<strong>Draft:</strong> ${formatMeters(meta.draught/10)}<br>`;
           if (shipType !== undefined) popupHtml += `<strong>Ship type code:</strong> ${shipType} (${shipTypeName(shipType)})<br>`;
           popupHtml += `<hr style="margin:4px 0;">`;
@@ -284,10 +365,12 @@
     }
   }
 
-  // Load MMSI countries first and start the map after that
+  // Load MMSI countries, then UN/LOCODE, then start AIS polling
   loadMmsiCountry(() => {
-    loadAis();
-    setInterval(loadAis, 60 * 1000);
+    loadUnlocode(() => {
+      loadAis();
+      setInterval(loadAis, 60 * 1000);
+    });
   });
 </script>
 </body>
