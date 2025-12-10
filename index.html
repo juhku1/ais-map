@@ -24,6 +24,15 @@
       z-index: 9999;
       pointer-events: none;
     }
+    .flag-img {
+      width: 24px;
+      height: 18px;
+      vertical-align: middle;
+      margin-left: 4px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background: #eee;
+    }
   </style>
 </head>
 <body>
@@ -105,24 +114,18 @@
   };
 
   function getCountryIso2FromMmsiCountry(countryName) {
-    // Try direct match
     if (countryNameToIso2[countryName]) return countryNameToIso2[countryName];
-    // Try first part before " - " (for "UK - Gibraltar" etc.)
     const mainName = countryName.split(" - ")[0].trim();
     if (countryNameToIso2[mainName]) return countryNameToIso2[mainName];
-    // Try just the first word (for safety)
     const firstWord = countryName.split(" ")[0].trim();
     if (countryNameToIso2[firstWord]) return countryNameToIso2[firstWord];
     return "";
   }
 
-  function countryFlagEmoji(countryCode) {
-    if (!countryCode || countryCode.length !== 2) return "";
-    const OFFSET = 127397;
-    return String.fromCodePoint(
-      countryCode.charCodeAt(0) + OFFSET,
-      countryCode.charCodeAt(1) + OFFSET
-    );
+  function flagImgTag(iso2) {
+    if (!iso2) return "";
+    // flagcdn.com uses lowercase ISO2 codes
+    return `<img class="flag-img" src="https://flagcdn.com/24x18/${iso2.toLowerCase()}.png" alt="${iso2} flag" loading="lazy">`;
   }
 
   // --- UN/LOCODE CSV ---
@@ -405,8 +408,8 @@
           // Registration country/flag
           const regCountry = getMmsiCountry(mmsi) || "–";
           const regIso2 = getCountryIso2FromMmsiCountry(regCountry);
-          const regFlag = regIso2 ? ` ${countryFlagEmoji(regIso2)}` : "";
-          popupHtml += `<strong>Flag state:</strong> ${regCountry}${regFlag}<br>`;
+          const regFlag = regIso2 ? flagImgTag(regIso2) : "";
+          popupHtml += `<strong>Flag state:</strong> ${regCountry} ${regFlag}<br>`;
 
           if (meta.imo) popupHtml += `<strong>IMO:</strong> ${meta.imo}<br>`;
           if (meta.callSign) popupHtml += `<strong>Callsign:</strong> ${meta.callSign}<br>`;
