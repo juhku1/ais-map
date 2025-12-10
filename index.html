@@ -3,20 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <title>AIS-kartta (Digitraffic + Leaflet)</title>
+
+  <!-- Leaflet CSS -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin=""
   />
+
   <style>
-    html, body { height: 100%; margin: 0; }
-    #map { height: 100%; width: 100%; }
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+    }
   </style>
 </head>
 <body>
 <div id="map"></div>
 
+<!-- Leaflet JS -->
 <script
   src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
@@ -24,17 +34,21 @@
 ></script>
 
 <script>
+  // Muuta tämä omaan sovellukseesi sopivaksi
   const DIGITRAFFIC_USER = "JuhaMatti/LeafletAISDemo 1.0";
 
-  const map = L.map("map").setView([60.2, 22.0], 6);
+  // Luodaan Leaflet-kartta
+  const map = L.map("map").setView([60.2, 22.0], 6); // Suomen rannikko suunnilleen
 
+  // Taustakartta (OSM)
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
     attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   }).addTo(map);
 
   let vesselLayer = null;
+  let firstLoad = true; // zoomataan vain ensimmäisellä kerralla
 
   async function loadAis() {
     const sixHoursMs = 6 * 60 * 60 * 1000;
@@ -48,24 +62,67 @@
           "Accept": "application/json"
         }
       });
-      if (!res.ok) throw new Error("HTTP " + res.status);
+
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status + " " + res.statusText);
+      }
+
       const data = await res.json();
 
-      if (vesselLayer) vesselLayer.remove();
+      // Poistetaan vanha kerros, jos on
+      if (vesselLayer) {
+        vesselLayer.remove();
+      }
+
+      // GeoJSON-kerros aluksille
       vesselLayer = L.geoJSON(data, {
-        pointToLayer: (feature, latlng) =>
-          L.circleMarker(latlng, { radius: 4, weight: 1, opacity: 1, fillOpacity: 0.8 })
+        pointToLayer: (feature, latlng) => {
+          const props = feature.properties || {};
+          const mmsi = props.mmsi || feature.mmsi || "–";
+          const name = props.name || "Tuntematon alus";
+          const sog = props.sog || props.speedOverGround;
+          const cog = props.cog || props.courseOverGround;
+
+          let popupHtml =
+            `<strong>${name}</strong><br>` +
+            `<strong>MMSI:</strong> ${mmsi}`;
+
+          if (typeof sog !== "undefined") {
+            popupHtml += `<br><strong>SOG:</strong> ${sog} kn`;
+          }
+          if (typeof cog !== "undefined") {
+            popupHtml += `<br><strong>COG:</strong> ${cog}&deg;`;
+          }
+
+          return L.circleMarker(latlng, {
+            radius: 4,
+            weight: 1,
+            opacity: 1.0,
+            fillOpacity: 0.8
+          }).bindPopup(popupHtml);
+        }
       }).addTo(map);
 
-      const bounds = vesselLayer.getBounds();
-      if (bounds.isValid()) map.fitBounds(bounds.pad(0.1));
-    } catch (e) {
-      console.error("AIS-haku epäonnistui:", e);
+      // Zoomaa alusten ympärille vain ensimmäisellä haulla
+      if (firstLoad) {
+        const bounds = vesselLayer.getBounds();
+        if (bounds.isValid()) {
+          map.fitBounds(bounds.pad(0.1));
+        }
+        firstLoad = false;
+      }
+
+      console.log("AIS features:", data.features ? data.features.length : 0);
+    } catch (err) {
+      console.error("AIS-datan haku epäonnistui:", err);
     }
   }
 
+  // Ensimmäinen haku
   loadAis();
-  // setInterval(loadAis, 2 * 60 * 1000); // jos haluat päivittyvän kartan
+
+  // Päivitä 60 sekunnin välein
+  setInterval(loadAis, 60 * 1000);
 </script>
 </body>
 </html>
